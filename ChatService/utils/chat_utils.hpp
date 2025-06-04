@@ -11,7 +11,8 @@
 using U16       =   uint16_t;
 using sock      =   boost::asio::ip::tcp::socket;
 using sock_ptr  =   std::shared_ptr<sock>;
-using vec_ptr   =   std::shared_ptr<std::vector<char>>;
+using vec       =   std::vector<char>;
+using vec_ptr   =   std::shared_ptr<vec>;
 
 
 enum class MessageFlag : U16    // actually takes only 3 bits
@@ -28,11 +29,12 @@ enum class MessageFlag : U16    // actually takes only 3 bits
 
 
 constexpr size_t MSG_PREFIX = sizeof(U16); // 13 - len => 3 - flag
-constexpr size_t BUFF_SIZE = 8191;
+constexpr size_t BUFF_SIZE = 1024;
 
 
 std::pair<size_t, MessageFlag> DecodePrefix(const std::vector<char>& prefix);
 boost::asio::ip::tcp::endpoint CreateAddress(const std::string& address);
+
 
 template<typename T>
 void run(int argc, char* argv[]);

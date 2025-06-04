@@ -1,8 +1,8 @@
 #include "server.hpp"
 
-#include <string_view>
-
 using namespace boost::asio;
+
+
 
 Server::Server(const std::string &address) : io(), acc(io)
 {
@@ -15,11 +15,19 @@ Server::Server(const std::string &address) : io(), acc(io)
 
 
 
+Server::~Server()
+{
+    for(auto& t : workers) {
+        if(t.joinable()) { t.join(); }
+    }
+}
+
+
+
 void Server::launch()
 {
     acc.listen();
     start_accept();
-    handle_signals();
 
     size_t tc = std::thread::hardware_concurrency();
     workers.resize(tc);
@@ -29,131 +37,114 @@ void Server::launch()
     }
 }
 
+
+
 void Server::start_accept()
 {
-    auto client = std::make_shared<sock>(io);
-    acc.async_accept(*client, 
-        [this, client](const boost::system::error_code& ec)
+    auto new_client = std::make_shared<sock>(io);
+    acc.async_accept(
+        *new_client,
+        [this, new_client](const boost::system::error_code &ec)
         {
-            if(!ec) 
-            {      
-                recv_message(client);
-
-                std::lock_guard<std::mutex> ul(clientsMTX);
-                clients.insert(client);
+            if(ec) {
+                return;
             }
 
+            {
+                std::lock_guard<std::mutex> lg(clientsMTX);
+                clients.insert(new_client);
+            }
+
+            {
+                std::lock_guard<std::mutex> lg(ioMTX);
+                std::cout << "------Client Connected------\n";
+            }
+
+            start_client(new_client);
             start_accept();
         }
-    );
+    ); 
 }
 
-void Server::recv_message(sock_ptr sender)
+
+
+void Server::start_client(sock_ptr client)
 {
-    /* 
-    message format: 
-        -3  bits: msg flag
-        -13 bits: msg len
-        -msg len bytes: msg
+    auto prefix = std::make_shared<vec>(MSG_PREFIX);
 
-        fl     |     len         |          msg
-        3 bits |     13 bits     |          len bytes
-    */
-
-
-    auto buf = std::make_shared<std::vector<char>>(MSG_PREFIX);
-
-    // reading prefix first 16 bits
     async_read(
-        *sender,
-        buffer(*buf),
-        [this, sender, buf](const boost::system::error_code& ec, size_t bt)
+        *client,
+        buffer(*prefix),
+        [this, client, prefix]
+        (const boost::system::error_code &ec, size_t bt)
         {
-            if(ec || bt != MSG_PREFIX)
-            {
-                handle_disconnect(sender);
+            if(ec) {
                 return;
             }
 
-            auto [len, flag] = DecodePrefix(*buf);
+
+            auto [len, flag] = DecodePrefix(*prefix);
 
             if(flag == MessageFlag::Logout) {
-                handle_disconnect(sender);
+                {
+                    std::lock_guard<std::mutex> lg(ioMTX);
+                    std::cout << "------Client Disconnected------\n";
+                }
+
+                {
+                    std::lock_guard<std::mutex> lg(clientsMTX);
+                    clients.erase(client);
+                }
+
                 return;
             }
 
+            auto msg = std::make_shared<vec>(len);
 
-            buf->resize(MSG_PREFIX + len);
-
-            // reading message
             async_read(
-                *sender,
-                buffer(buf->data() + MSG_PREFIX, len),
-                [this, len, sender, buf](const boost::system::error_code& ec, size_t bt)
+                *client,
+                buffer(*msg),
+                [this, client, msg, prefix]
+                (const boost::system::error_code &ec, size_t bt)
                 {
-                    if(ec || bt != len)
-                    {
-                        handle_disconnect(sender);
+                    if(ec) {
                         return;
                     }
 
-                    // sending message to all the clients
-                    send_message(sender, buf);
-
-                    // and again waiting for client to send msg
-                    recv_message(sender);
+                    send_message(client, msg, prefix);
+                    start_client(client);
                 }
             );
         }
     );
 }
 
-void Server::send_message(sock_ptr sender, vec_ptr buf)
+void Server::send_message(sock_ptr sender, vec_ptr msg, vec_ptr prefix)
 {
-    std::lock_guard<std::mutex> sl(clientsMTX);
-    for(auto client : clients)
+    std::lock_guard<std::mutex> lg(clientsMTX);
+    for(auto& client : clients)
     {
-        if(client == sender) continue;  
+        if(client == sender) continue;
 
         async_write(
             *client,
-            buffer(*buf),
-            [this, client](const boost::system::error_code& ec, size_t)
+            buffer(*prefix),
+            [client, msg](const boost::system::error_code &ec, size_t bt)
             {
-                if(ec)
-                {
-                    handle_disconnect(client);
+                if(ec) {
                     return;
                 }
+
+                async_write(
+                    *client,
+                    buffer(*msg),
+                    [](const boost::system::error_code& ec, size_t){
+                        if(ec) {
+                            return;
+                        }
+                    }
+                );
             }
         );
     }
-}
-
-void Server::handle_disconnect(sock_ptr client)
-{
-    std::lock_guard<std::mutex> ul(clientsMTX);
-    clients.erase(client);
-}
-
-void Server::handle_signals()
-{
-    auto sig = std::make_shared<signal_set>(io, SIGINT, SIGTERM);
-    
-    sig->async_wait([this](boost::system::error_code, int) 
-    {
-        std::cout << "SERVER STOPPED!\n";
-
-        {
-            std::lock_guard<std::mutex> ul(clientsMTX);
-            clients.clear();
-        }
-        
-        acc.close();
-        io.stop();
-        
-        for(auto& t : workers) {
-            if(t.joinable()) { t.join(); }
-        }
-    });
 }
