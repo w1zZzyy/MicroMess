@@ -7,6 +7,7 @@
 #include <queue>
 
 #include "chat_utils.hpp"
+#include "message.hpp"
 
 
 class Server
@@ -20,9 +21,9 @@ public:
 
 private:
 
-    boost::asio::io_context io;
-    boost::asio::ip::tcp::acceptor acc;
-    boost::asio::ip::tcp::endpoint ep;
+    io_context io;
+    ip::tcp::acceptor acc;
+    ip::tcp::endpoint ep;
 
     std::vector<std::thread> workers;
 
@@ -31,11 +32,9 @@ private:
 
 
     // adding new clients
-    void start_accept();
+    awaitable<void> start_accept();
 
     // receiving messages from client
-    void start_client(sock_ptr client);
-
-    // sends message to all clients
-    void send_message(sock_ptr sender, vec_ptr msg, vec_ptr prefix);
+    // and sending it to others
+    awaitable<void> start_client(sock_ptr client);
 };

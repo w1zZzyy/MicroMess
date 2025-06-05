@@ -1,8 +1,5 @@
 #include "server.hpp"
 
-using namespace boost::asio;
-
-
 
 Server::Server(const std::string &address) : io(), acc(io)
 {
@@ -27,7 +24,8 @@ Server::~Server()
 void Server::launch()
 {
     acc.listen();
-    start_accept();
+    
+    co_spawn(io, this->start_accept(), detached);
 
     size_t tc = std::thread::hardware_concurrency();
     workers.resize(tc);
@@ -37,114 +35,68 @@ void Server::launch()
     }
 }
 
-
-
-void Server::start_accept()
+awaitable<void> Server::start_accept()
 {
-    auto new_client = std::make_shared<sock>(io);
-    acc.async_accept(
-        *new_client,
-        [this, new_client](const boost::system::error_code &ec)
-        {
-            if(ec) {
-                return;
-            }
-
-            {
-                std::lock_guard<std::mutex> lg(clientsMTX);
-                clients.insert(new_client);
-            }
-
-            {
-                std::lock_guard<std::mutex> lg(ioMTX);
-                std::cout << "------Client Connected------\n";
-            }
-
-            start_client(new_client);
-            start_accept();
-        }
-    ); 
-}
-
-
-
-void Server::start_client(sock_ptr client)
-{
-    auto prefix = std::make_shared<vec>(MSG_PREFIX);
-
-    async_read(
-        *client,
-        buffer(*prefix),
-        [this, client, prefix]
-        (const boost::system::error_code &ec, size_t bt)
-        {
-            if(ec) {
-                return;
-            }
-
-
-            auto [len, flag] = DecodePrefix(*prefix);
-
-            if(flag == MessageFlag::Logout) {
-                {
-                    std::lock_guard<std::mutex> lg(ioMTX);
-                    std::cout << "------Client Disconnected------\n";
-                }
-
-                {
-                    std::lock_guard<std::mutex> lg(clientsMTX);
-                    clients.erase(client);
-                }
-
-                return;
-            }
-
-            auto msg = std::make_shared<vec>(len);
-
-            async_read(
-                *client,
-                buffer(*msg),
-                [this, client, msg, prefix]
-                (const boost::system::error_code &ec, size_t bt)
-                {
-                    if(ec) {
-                        return;
-                    }
-
-                    send_message(client, msg, prefix);
-                    start_client(client);
-                }
-            );
-        }
-    );
-}
-
-void Server::send_message(sock_ptr sender, vec_ptr msg, vec_ptr prefix)
-{
-    std::lock_guard<std::mutex> lg(clientsMTX);
-    for(auto& client : clients)
+    for(;;)
     {
-        if(client == sender) continue;
+        auto new_client = std::make_shared<sock>(io);
+        co_await acc.async_accept(*new_client, use_awaitable);
 
-        async_write(
-            *client,
-            buffer(*prefix),
-            [client, msg](const boost::system::error_code &ec, size_t bt)
-            {
-                if(ec) {
-                    return;
-                }
+        {
+            std::lock_guard<std::mutex> lg(clientsMTX);
+            clients.insert(new_client);
+        }
 
-                async_write(
-                    *client,
-                    buffer(*msg),
-                    [](const boost::system::error_code& ec, size_t){
-                        if(ec) {
-                            return;
-                        }
-                    }
-                );
-            }
-        );
+        co_spawn(new_client->get_executor(), this->start_client(new_client), detached);
     }
+
+    co_return;
+}
+
+awaitable<void> Server::start_client(sock_ptr client)
+{
+    for(;;)
+    {
+        auto msg = Message::Create();
+
+        co_await msg->read_prefix(*client);
+        co_await msg->read_data(*client);
+
+
+        switch (msg->getType())
+        {
+        case MessageType::Logout:
+            {
+            std::lock_guard<std::mutex> lg(ioMTX);
+            std::cout << "---Client [" << msg->getName() << "] Disconnected---\n";
+            }
+            {
+            std::lock_guard<std::mutex> lg(clientsMTX);
+            clients.erase(client);  
+            }
+
+            client->shutdown(boost::asio::ip::tcp::socket::shutdown_both);
+            client->close();
+            continue;
+
+        case MessageType::Login:
+            {
+            std::lock_guard<std::mutex> lg(ioMTX);
+            std::cout << "---Client [" << msg->getName() << "] Connected---\n";
+            }
+            continue;
+
+        default:
+            break;
+        }
+
+        std::unique_lock<std::mutex> lg(clientsMTX);
+        for(auto& receiver : clients)
+        {
+            if(receiver == client) continue;
+            co_await msg->write(*receiver);
+        }
+    }
+
+    co_return;
 }

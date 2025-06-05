@@ -1,137 +1,76 @@
 #include "client.hpp"
-
+#include <message.hpp>
 #include <iostream>
 
 using namespace boost::asio;
 
-Client::Client(const std::string &address) : 
+Client::Client(const std::string &address, const std::string& name) : 
+    name(name),
     socket(io), sig(io, SIGTERM, SIGINT),
     input(io, ::dup(STDIN_FILENO))
-{
-    ep = CreateAddress(address);
-    socket.connect(ep);
-}
+{ ep = CreateAddress(address); }
 
 
 
 void Client::launch()
 {
-    handle_signals();
-    sender();
-    receiver();
+    socket.connect(ep);
+
+    auto msg_con = Message::Create(name, "", MessageType::Login);
+    std::cout << msg_con->getName() << "\n";
+    co_spawn(io, msg_con->write(socket), detached);
+
+    co_spawn(io, this->handle_signals(), detached);
+    co_spawn(io, this->sender(), detached);
+    co_spawn(io, this->receiver(), detached);
+
     io.run();
 }
 
 
-
-void Client::sender()
+awaitable<void> Client::sender()
 {
-    async_read_until(
-        input, buf, '\n',
-        [this](const boost::system::error_code& ec, size_t bt)
-        {
-            if(ec) {
-                return;
-            }
+    for(;;)
+    {
+        co_await async_read_until(input, buf, '\n', use_awaitable);
 
-            std::istream is(&buf);
-            std::string msg;
-            std::getline(is, msg);
-            send_message(msg);
-        }
-    );
+        std::istream is(&buf);
+        std::string message;
+        std::getline(is, message);
+
+        auto msg = Message::Create(name, message, MessageType::Message);
+        co_await msg->write(socket);
+    }
+
+    co_return;
 }
 
-
-
-void Client::send_message(const std::string &msg)
+awaitable<void> Client::receiver()
 {
-    U16 msg_len = std::min(msg.size(), BUFF_SIZE);
-    U16 prefix = (U16(MessageFlag::TextAll) << 13) | msg_len;
-    auto buf = std::make_shared<vec>(MSG_PREFIX + msg_len);
+    for(;;)
+    {
+        auto msg = Message::Create();
 
-    memcpy(buf->data(), &prefix, MSG_PREFIX);
-    memcpy(buf->data() + MSG_PREFIX, msg.data(), msg_len);
+        co_await msg->read_prefix(socket);
+        co_await msg->read_data(socket);
 
-    async_write(
-        socket,
-        buffer(*buf),
-        [this](const boost::system::error_code& ec, size_t bt)
-        {
-            if(ec) {
-                return;
-            }
+        std::cout << msg->getName() << ": " << msg->getMessage() << '\n';
+    }
 
-            sender();
-        }
-    ); 
+    co_return;
 }
 
-
-
-void Client::receiver()
+awaitable<void> Client::handle_signals()
 {
-    auto prefix = std::make_shared<vec>(MSG_PREFIX);
+    co_await sig.async_wait(use_awaitable);
 
-    async_read(
-        socket,
-        buffer(*prefix),
-        [this, prefix]
-        (const boost::system::error_code &ec, size_t bt)
-        {
-            if(ec) {
-                return;
-            }
+    auto msg = Message::Create(name, "", MessageType::Logout);
+    co_await msg->write(socket);
 
-            auto [len, flag] = DecodePrefix(*prefix);
-            auto msg = std::make_shared<vec>(len);
+    socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both);
+    socket.close();
+    io.stop();
+    input.close();
 
-            recv_message(msg);
-        }
-    );
-}
-
-
-
-void Client::recv_message(vec_ptr msg)
-{
-    async_read(
-        socket,
-        buffer(*msg),
-        [this, msg]
-        (const boost::system::error_code &ec, size_t bt)
-        {
-            if(ec) {
-                return;
-            }
-
-            std::cout << std::string(msg->begin(), msg->end()) << "\n";
-
-            receiver();
-        }
-    );
-}
-
-
-
-void Client::handle_signals()
-{
-    sig.async_wait(
-        [this](const boost::system::error_code&, int)
-        {
-            constexpr auto flag = U16(MessageFlag::Logout) << 13;
-
-            char bytes_flag[MSG_PREFIX];
-            memcpy(bytes_flag, &flag, MSG_PREFIX);
-            
-            socket.send(
-                buffer(bytes_flag)
-            );
-
-            socket.shutdown(boost::asio::ip::tcp::socket::shutdown_both);
-            socket.close();
-            io.stop();
-            input.close();
-        }
-    );
+    co_return;
 }

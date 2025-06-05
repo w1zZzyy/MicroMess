@@ -5,11 +5,13 @@ find_package(Boost REQUIRED)
 include_directories(${Boost_INCLUDE_DIRS})
 
 add_library(UtilsLib STATIC
-    utils/chat_utils.cpp
-    utils/chat_utils.hpp
+    utils/chat_utils.cpp utils/chat_utils.hpp
+    utils/message.cpp utils/message.hpp
 )
 target_include_directories(UtilsLib PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/utils)
 target_link_libraries(UtilsLib PUBLIC ${Boost_LIBRARIES})
+target_compile_features(UtilsLib PUBLIC cxx_std_20)
+
 
 add_library(ClientLib STATIC
     client/client.cpp

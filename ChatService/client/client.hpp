@@ -6,21 +6,21 @@ class Client
 {
 public:
 
-    Client(const std::string& address);
+    Client(const std::string& address, const std::string& name);
     void launch();
 
 private:
 
-    boost::asio::io_context                 io;
-    boost::asio::posix::stream_descriptor   input;
-    boost::asio::ip::tcp::endpoint          ep;
-    sock                                    socket;
-    boost::asio::signal_set                 sig;
-    boost::asio::streambuf                  buf;
+    io_context                 io;
+    posix::stream_descriptor   input;
+    ip::tcp::endpoint          ep;
+    sock                       socket;
+    signal_set                 sig;
+    streambuf                  buf;
+    std::string                name;
 
-    void sender();
-    void send_message(const std::string& msg);
-    void receiver();
-    void recv_message(vec_ptr msg);
-    void handle_signals();
+
+    awaitable<void> sender();
+    awaitable<void> receiver();
+    awaitable<void> handle_signals();
 };
